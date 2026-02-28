@@ -64,6 +64,29 @@ gauss_master_should_exit = False
 _http_service = HttpService()
 
 
+def load_env_files_from_conf_dir(confpath: str) -> None:
+    """Load KEY=VALUE from conf/.env or conf/local.env into os.environ (setdefault, does not override)."""
+    for filename in ('.env', 'local.env'):
+        path = os.path.join(confpath, filename)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding='utf-8') as ef:
+                for line in ef:
+                    line = line.strip()
+                    if not line or line.startswith('#') or '=' not in line:
+                        continue
+                    key, _, val = line.partition('=')
+                    key, val = key.strip(), val.strip()
+                    if not key:
+                        continue
+                    if len(val) >= 2 and val[0] == val[-1] and val[0] in '"\'':
+                        val = val[1:-1]
+                    os.environ.setdefault(key, val)
+        except OSError:
+            pass
+
+
 def init_global_configs(confpath, need_check):
     """
     - param confpath: the path of gaussmaster.conf
@@ -77,12 +100,17 @@ def init_global_configs(confpath, need_check):
 
     validate_ssl_config(SECTION_VECTOR)
 
-    dbmind_api_prefix = global_vars.configs.get(DBMIND, 'api_prefix')
-    if dbmind_api_prefix and not dbmind_api_prefix.startswith('https://'):
+    dbmind_api_prefix = (global_vars.configs.get(DBMIND, 'api_prefix') or '').strip()
+    if dbmind_api_prefix.startswith('http://'):
         utils.cli.write_to_terminal(
             "FATAL: DBMIND service is using an insecure protocol.",
             color='red')
         sys.exit(0)
+    if dbmind_api_prefix and not dbmind_api_prefix.startswith('https://'):
+        utils.cli.write_to_terminal(
+            "WARN: DBMind api_prefix is not https:// (placeholder or invalid); DBMind integration disabled until "
+            "you set a valid https URL.",
+            color='yellow')
     validate_ssl_config(DBMIND)
 
     validate_ssl_config(SECTION_WEB_SERVICE)
@@ -191,34 +219,45 @@ def check_config(conf_path, need_check):
 
     with UpdateConfig(gauss_master_config_path) as config:
         stdin_dict = get_json_from_stdin()
-        dbmind_api_prefix = config.get(DBMIND, 'api_prefix')[0]
-        if dbmind_api_prefix and not dbmind_api_prefix.startswith('https://'):
+        dbmind_api_prefix = (config.get(DBMIND, 'api_prefix')[0] or '').strip()
+        if dbmind_api_prefix.startswith('http://'):
             utils.cli.write_to_terminal(
                 "FATAL: DBMind service is using an insecure protocol, exit...",
                 color='red')
             sys.exit(0)
+        if dbmind_api_prefix and not dbmind_api_prefix.startswith('https://'):
+            utils.cli.write_to_terminal(
+                "WARN: DBMind api_prefix is not https:// (placeholder or invalid); DBMind integration disabled until "
+                "you set a valid https URL.",
+                color='yellow')
         for section, option in [(SECTION_VECTOR, 'password'), (SECTION_WEB_SERVICE, 'ssl_keyfile_password'),
                                 (DBMIND, 'ssl_keyfile_password')]:
             password = get_config_option_from_stdin(section, option, stdin_dict)
             if option == 'ssl_keyfile_password':
-                if need_check and not check_password_strength(password):
-                    utils.cli.write_to_terminal(
-                        "FATAL: %s_ssl_keyfile_password is not strong enough, exit..." % section,
-                        color='red')
-                    sys.exit(0)
-                if not os.path.exists(config.get(section, 'ssl_keyfile')[0]):
-                    utils.cli.write_to_terminal(
-                        "FATAL: %s service is using an insecure protocol, exit..." % section,
-                        color='red')
-                    sys.exit(0)
-                if not constants.SSL or 'ENCRYPTED' not in open(config.get(section, 'ssl_keyfile')[0]).read():
-                    utils.cli.write_to_terminal(
-                        "FATAL: %s service is using insecure SSL configuration, exit..." % section,
-                        color='red')
-                    sys.exit(0)
+                keyfile = (config.get(section, 'ssl_keyfile')[0] or '').strip()
+                if section == SECTION_WEB_SERVICE and not constants.SSL:
+                    pass
+                elif not keyfile or keyfile.upper() == '(NULL)':
+                    pass
+                else:
+                    if need_check and password and not check_password_strength(password):
+                        utils.cli.write_to_terminal(
+                            "FATAL: %s_ssl_keyfile_password is not strong enough, exit..." % section,
+                            color='red')
+                        sys.exit(0)
+                    if not os.path.exists(keyfile):
+                        utils.cli.write_to_terminal(
+                            "FATAL: %s service is using an insecure protocol, exit..." % section,
+                            color='red')
+                        sys.exit(0)
+                    if not constants.SSL or 'ENCRYPTED' not in open(keyfile, encoding='utf-8', errors='ignore').read():
+                        utils.cli.write_to_terminal(
+                            "FATAL: %s service is using insecure SSL configuration, exit..." % section,
+                            color='red')
+                        sys.exit(0)
             if password:
                 save_config_password(config, section, option, password)
-            elif not has_config_password(config, section, option):
+            elif need_check and not has_config_password(config, section, option):
                 raise ValueError(f'You should pass the value of \'{section}_{option}\' through '
                                  f'the json, exit...')
 
@@ -388,6 +427,7 @@ class Main:
 
         # Set global variables.
         init_global_configs(self.confpath, need_check=False)
+        load_env_files_from_conf_dir(self.confpath)
         # Set logger.
         logging_handler = init_logger_with_config()
         for p in split(global_vars.configs.get(SECTION_VECTOR, 'password')):
@@ -447,7 +487,9 @@ class Main:
     def stop(self, level='low'):
         """stop GaussMaster process"""
 
-        level_mapper = {'low': signal.SIGTERM, 'mid': signal.SIGQUIT, 'high': signal.SIGKILL}
+        sigquit = getattr(signal, 'SIGQUIT', signal.SIGTERM)
+        sigkill = getattr(signal, 'SIGKILL', signal.SIGTERM)
+        level_mapper = {'low': signal.SIGTERM, 'mid': sigquit, 'high': sigkill}
 
         """Stop the daemon process"""
         pid = read_pid_file(self.pid_file)
@@ -456,9 +498,9 @@ class Main:
             return
 
         def kill_process_group(sig):
-            if sig in (signal.SIGTERM, signal.SIGQUIT):
+            if sig in (signal.SIGTERM, sigquit):
                 os.kill(pid, sig)
-            elif sig == signal.SIGKILL:
+            elif sig == sigkill:
                 os.kill(pid, sig)
             else:
                 dbmind_assert(False)
@@ -469,7 +511,7 @@ class Main:
             while True:
                 # retry to kill
                 write_to_terminal('Waiting for process to exit...')
-                kill_process_group(level_mapper.get(level, 'low'))
+                kill_process_group(level_mapper.get(level, level_mapper['low']))
                 send_count += 1
                 time.sleep(1)
                 # if quitting is timeout, signal will upgrade.

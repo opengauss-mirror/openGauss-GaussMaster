@@ -50,9 +50,12 @@ def union_adjacent_text(prev_text, text):
 class OnlineEmbedding():
     """Class representing online embedding"""
 
-    def __init__(self, url, ssl_context):
+    def __init__(self, url, ssl_context, api_key=None):
         self.url = url
         self.ssl_context = ssl_context
+        self.headers = {'Content-Type': 'application/json'}
+        if api_key:
+            self.headers['Authorization'] = f'Bearer {api_key}'
 
     async def query_embedding(self, query):
         """Function get query embedding"""
@@ -76,7 +79,8 @@ class OnlineEmbedding():
         try:
             with ThreadPoolExecutor() as pool:
                 with create_requests_session(ssl_context=self.ssl_context) as session:
-                    embedding_response = functools.partial(session.post, url=self.url, data=json.dumps(data))
+                    embedding_response = functools.partial(
+                        session.post, url=self.url, data=json.dumps(data), headers=self.headers)
                     response = await asyncio.get_running_loop().run_in_executor(pool, embedding_response)
                     response = response.json()
                     return response
@@ -87,9 +91,12 @@ class OnlineEmbedding():
 class OnlineReranker():
     """Class representing online reranker"""
 
-    def __init__(self, url, ssl_context):
+    def __init__(self, url, ssl_context, api_key=None):
         self.url = url
         self.ssl_context = ssl_context
+        self.headers = {'Content-Type': 'application/json'}
+        if api_key:
+            self.headers['Authorization'] = f'Bearer {api_key}'
 
     async def compute_score(self, pairs):
         """Function compute scores of pairs"""
@@ -99,12 +106,40 @@ class OnlineReranker():
         try:
             with ThreadPoolExecutor() as pool:
                 with create_requests_session(ssl_context=self.ssl_context) as session:
-                    rerank_response = functools.partial(session.post, url=self.url, data=json.dumps(data))
+                    rerank_response = functools.partial(
+                        session.post, url=self.url, data=json.dumps(data), headers=self.headers)
                     response = await asyncio.get_running_loop().run_in_executor(pool, rerank_response)
                     response = response.json()
                     return response
         except Exception as e:
             raise Exception(f'reranker service is not accessible, because {e}') from e
+
+
+class DisabledOnlineEmbedding:
+    """Placeholder when embedding is disabled or URL is unset; infer-only flows avoid vector search."""
+
+    def __init__(self, url=None, ssl_context=None, api_key=None):
+        pass
+
+    async def query_embedding(self, query):
+        return [0.0] * 1024
+
+    async def doc_embedding(self, queries):
+        n = 1 if isinstance(queries, str) else len(queries)
+        return [[0.0] * 1024 for _ in range(n)]
+
+    def get_embedding_dimensions(self):
+        return 1024
+
+
+class DisabledOnlineReranker:
+    """Placeholder when reranker is disabled; returns neutral scores."""
+
+    def __init__(self, url=None, ssl_context=None, api_key=None):
+        pass
+
+    async def compute_score(self, pairs):
+        return [0.0] * len(pairs) if pairs else []
 
 
 class BaseRetriever():

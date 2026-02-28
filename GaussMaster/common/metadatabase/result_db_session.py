@@ -53,7 +53,7 @@ def update_session_clz_from_configs(is_terminal):
     engine = create_engine(dsn, pool_pre_ping=True, pool_size=10, max_overflow=10, pool_recycle=25,
                            connect_args={'connect_timeout': 5, 'application_name': 'DBMind-Service',
                                          'sslmode': ssl_mode})
-    session_maker = sessionmaker(bind=engine, autocommit=True)
+    session_maker = sessionmaker(bind=engine)
     conn = None
     try:
         conn = engine.connect()

@@ -31,8 +31,9 @@ class Baichuan(BaseLLM):
     """
     url = ""
 
-    def __init__(self, model, url, temperature=0, stream=True):
+    def __init__(self, model, url, temperature=0, stream=True, api_key=None):
         super().__init__(model, url, temperature, stream)
+        self.api_key = api_key
         self.data = {
             'messages': [],
         }
@@ -47,6 +48,8 @@ class Baichuan(BaseLLM):
             prompt = [{LLMRole.USER: prompt}]
         self.data['messages'] = prompt
         headers = {"Accept": "text/event-stream", "Connection": "keep-alive", "Cache-Control": "no-cache"}
+        if self.api_key:
+            headers['Authorization'] = f'Bearer {self.api_key}'
         result = ''
         with ThreadPoolExecutor() as pool:
             llm_response = functools.partial(requests.post, url=self.url,

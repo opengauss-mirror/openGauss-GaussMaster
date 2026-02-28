@@ -22,6 +22,7 @@ class LLMType:
     CHATGLM = 'chatglm'
     BAICHUAN = 'baichuan'
     LLAMA3 = 'llama3'
+    OPENAI_COMPATIBLE = 'openai_compatible'
 
 
 class InteractionType:

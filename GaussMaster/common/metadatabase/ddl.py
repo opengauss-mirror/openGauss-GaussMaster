@@ -31,10 +31,13 @@ def create_dynamic_config_schema():
     DynamicConfigDbBase.metadata.create_all(engine)
 
     # Batch insert default values into config tables.
-    with sessionmaker(engine, autocommit=True, autoflush=True)() as session:
+    Session = sessionmaker(bind=engine, autoflush=True)
+    with Session() as session:
         try:
             session.bulk_save_objects(Table.default_values())
+            session.commit()
         except sqlalchemy.exc.IntegrityError as e:
+            session.rollback()
             # May be duplicate, ignore it.
             raise DuplicateTableError(e) from e
 

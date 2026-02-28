@@ -52,10 +52,10 @@ def create_dsn(
     if db_type == DbType.SQLITE.value:
         dsn = '{}:///{}?check_same_thread=False'.format(db_type, database)
     else:
-        username = parse.quote(username)
-        password = parse.quote(password)
-        host = parse.quote(host)
-        database = parse.quote(database)
+        username = parse.quote(username or '')
+        password = parse.quote(password or '')
+        host = parse.quote(host or '')
+        database = parse.quote(database or '')
         dsn = '{}://{}:{}@{}:{}/{}'.format(db_type, username, password, host, port, database)
     if db_type == DbType.POSTGRESQL.value:
         dsn = dsn + '?options=-csearch_path%3D{}&client_encoding=utf8'.format(schema)  # only use the fixed schema

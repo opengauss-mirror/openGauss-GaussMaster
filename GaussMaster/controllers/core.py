@@ -27,7 +27,7 @@ from GaussMaster.multiagents.tools.dbmind_interface import retrieve_clusters_sta
 from GaussMaster.server.web import data_transformer
 from GaussMaster.server.web.context_manager import switch_llm_context_decorator, current_llm
 from GaussMaster.server.web.data_transformer import get_history_report, diagnostic_replay, get_all_models, switch_llm, \
-    batch_intelligent_scheduling, update_session_cluster
+    update_session_cluster
 
 latest_version = 'v1'
 api_prefix = '/%s/api' % latest_version
