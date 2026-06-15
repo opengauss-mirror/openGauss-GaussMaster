@@ -170,7 +170,8 @@ async def infer_arguments(question, intention_tool, qa_record_history, llm):
         arguments, success = output_parser.parse_params(result)
         if success:
             content_resp = f'将调用工具{intention_tool}'
-            function_call = {'name': intention_tool, 'arguments': arguments} if arguments else {}
+            params_dict = arguments if isinstance(arguments, dict) else {}
+            function_call = {'name': intention_tool, 'arguments': params_dict}
         else:
             content_resp = f'工具参数解析失败，请重新提供参数：{result}'
             function_call = {}

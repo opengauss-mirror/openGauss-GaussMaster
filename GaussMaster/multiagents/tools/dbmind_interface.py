@@ -134,7 +134,8 @@ def collect_stat_activity_workloads(database: str = None, schema: str = None) ->
     params = {
         "data_source": "pg_stat_activity",
         "databases": database,
-        "schemas": schema
+        "schemas": schema,
+        "duration": 0
     }
     return workload_collection_call(params)
 
@@ -195,7 +196,7 @@ def risk_analysis(metric, warning_hours):
         instance = split_ip_port(current_instance.get())[0]
     else:
         instance = current_instance.get()
-    params = {"instance": instance, "warning_hours": warning_hours}
+    params = {"instance": instance, "warning_hours": warning_hours, "tz": "UTC+8"}
     response = dbmind_request("get", url, params=params)
 
     target = []
@@ -758,7 +759,7 @@ def update_cluster_list():
     """update cluster list"""
     params = {"force": False}
     headers = {"Content-Type": "application/json"}
-    url = urljoin(global_vars.configs.get(DBMIND, "api_prefix"), "agents")
+    url = urljoin(global_vars.configs.get(DBMIND, "api_prefix"), "agent/status")
     with create_requests_session(ssl_context=get_ssl_context()) as session:
         response = session.put(url, headers=headers, data=json.dumps(params))
 
@@ -1759,6 +1760,39 @@ def knob_recommendation_details():
 
 
 @base_tools(
+    name="knob_recommendation_xtuner",
+    description="knob_recommendation_xtuner工具的功能是通过xtuner执行参数推荐，并将结果保存到数据库中，"
+                "knob_recommendation_xtuner工具没有参数，不需要进行参数提取。",
+)
+@validate_return_format
+def knob_recommendation_xtuner():
+    url = urljoin(global_vars.configs.get(DBMIND, "api_prefix"),
+                  "app/knob-recommendation/xtuner")
+    params = {
+        "instance": current_instance.get(),
+    }
+    response = dbmind_request("post", url, params=params)
+    target = []
+    if response.status_code == 200 and "data" in response.json():
+        data = response.json().get("data")
+        target.append(formatter_str({
+            "zh": "参数推荐执行成功，结果如下：",
+            "en": "Knob recommendation executed successfully, results are as follows:"
+        }))
+        target.append(formatter_table(data.get("header"), data.get("rows")))
+        return target
+    error_msg = ""
+    if response.status_code == 200 and "msg" in response.json():
+        error_msg = response.json().get("msg", "")
+    target.append(formatter_str({
+        "zh": f"参数推荐执行失败. {error_msg}",
+        "en": f"Failed to execute knob recommendation. {error_msg}"
+    }))
+
+    return target
+
+
+@base_tools(
     name="knob_recommendation_snapshots",
     description="knob_recommendation_snapshots工具的功能是获取参数推荐的快照，"
                 "knob_recommendation_snapshots工具没有参数，不需要进行参数提取。"
@@ -1801,7 +1835,7 @@ def memory_check(latest_hours: int = None):
     get the detail of memory
     """
     params = {"latest_hours": latest_hours} if latest_hours else None
-    url = urljoin(global_vars.configs.get(DBMIND, "api_prefix"), "app/memory-check")
+    url = urljoin(global_vars.configs.get(DBMIND, "api_prefix"), "toolkit/memory_check")
     response = dbmind_request("get", url, params=params)
     target = []
 

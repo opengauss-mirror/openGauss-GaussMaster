@@ -235,10 +235,10 @@ def check_config(conf_path, need_check):
             password = get_config_option_from_stdin(section, option, stdin_dict)
             if option == 'ssl_keyfile_password':
                 keyfile = (config.get(section, 'ssl_keyfile')[0] or '').strip()
-                if section == SECTION_WEB_SERVICE and not constants.SSL:
-                    pass
-                elif not keyfile or keyfile.upper() == '(NULL)':
-                    pass
+                # Skip SSL password check if not using SSL or keyfile is not configured
+                if (section == SECTION_WEB_SERVICE and not constants.SSL) or \
+                        not keyfile or keyfile.upper() == '(NULL)':
+                    continue
                 else:
                     if need_check and password and not check_password_strength(password):
                         utils.cli.write_to_terminal(
@@ -258,8 +258,10 @@ def check_config(conf_path, need_check):
             if password:
                 save_config_password(config, section, option, password)
             elif need_check and not has_config_password(config, section, option):
-                raise ValueError(f'You should pass the value of \'{section}_{option}\' through '
-                                 f'the json, exit...')
+                # Only require password if it's a mandatory field
+                if option != 'ssl_keyfile_password' or (keyfile and keyfile.upper() != '(NULL)'):
+                    raise ValueError(f'You should pass the value of \'{section}_{option}\' through '
+                                     f'the json, exit...')
 
 
 def setup_directory(confpath):
