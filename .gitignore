@@ -10,3 +10,4 @@ __pycache__/
 GaussMaster/conf/*.pid
 GaussMaster/conf/logs/
 GaussMaster/conf/dynamic_config.db
+.idea/
