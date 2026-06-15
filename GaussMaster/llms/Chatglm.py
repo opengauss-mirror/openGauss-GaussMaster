@@ -30,9 +30,12 @@ class Chatglm(BaseLLM):
     chatglm llm
     """
     url = ""
+    headers = {'Content-Type': 'application/json'}
 
-    def __init__(self, model, url, temperature=0, stream=False):
+    def __init__(self, model, url, temperature=0, stream=False, api_key=None):
         super().__init__(model, url, temperature, stream)
+        if api_key:
+            self.headers['Authorization'] = f'Bearer {api_key}'
         self.data = {
             'messages': [],
         }
@@ -49,6 +52,7 @@ class Chatglm(BaseLLM):
         with ThreadPoolExecutor() as pool:
             llm_response = functools.partial(requests.post, url=self.url,
                                              data=json.dumps(self.data),
+                                             headers=self.headers,
                                              timeout=120)
             resp = await asyncio.get_running_loop().run_in_executor(pool, llm_response)
         result = resp.text

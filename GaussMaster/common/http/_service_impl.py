@@ -263,8 +263,9 @@ def standardized_event_stream_output(f):
                         yield f"data:{json.dumps({'success': True, 'data': item}, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}\n\n"
                 except Exception as e:
                     logging.getLogger('uvicorn.error').exception(e)
+                    err_msg = str(e).strip() or 'Internal server error.'
                     yield f"data:" \
-                          f"{json.dumps({'success': False, 'msg': 'Internal server error.'}, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}\n\n"
+                          f"{json.dumps({'success': False, 'msg': err_msg}, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}\n\n"
 
             return StreamingResponse(standardize_generator(), media_type="text/event-stream")
         except Exception as e:

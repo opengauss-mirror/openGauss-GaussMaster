@@ -11,6 +11,7 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
+import logging
 import os
 import shutil
 from datetime import datetime
@@ -35,6 +36,188 @@ DEFAULT_NUM_PARALLELS = 30
 DB_KEY = 'VECTOR'
 CREATE_KEY = 'create_time'
 FILE_KEY = 'filename'
+
+# vector_sql_dialect in [VECTOR]: gaussdb (Huawei GaussDB vector SQL) or opengauss (openGauss DataVec)
+VECTOR_SQL_DIALECT_GAUSSDB = 'gaussdb'
+VECTOR_SQL_DIALECT_OPENGAUSS = 'opengauss'
+
+
+def get_vector_sql_dialect():
+    raw = (global_vars.configs.get(DB_KEY, 'vector_sql_dialect', fallback='gaussdb') or 'gaussdb').strip().lower()
+    if raw in ('opengauss', 'datavec', 'og'):
+        return VECTOR_SQL_DIALECT_OPENGAUSS
+    return VECTOR_SQL_DIALECT_GAUSSDB
+
+
+def get_vector_sql_backend():
+    """Return dialect handler for vector/BM25 SQL (GaussDB vs openGauss DataVec)."""
+    if get_vector_sql_dialect() == VECTOR_SQL_DIALECT_OPENGAUSS:
+        return OpenGaussDataVecSqlBackend()
+    return GaussDbVectorSqlBackend()
+
+
+class VectorSqlBackend:
+    """Builds dialect-specific vector and BM25 SQL fragments."""
+
+    dialect_id: str = VECTOR_SQL_DIALECT_GAUSSDB
+
+    def vector_column_type_sql(self, dimension: int) -> str:
+        raise NotImplementedError
+
+    def query_vector_literal(self, embedding_strs: List[str]) -> str:
+        raise NotImplementedError
+
+    def insert_vector_literal(self, embedding_strs: List[str]) -> str:
+        return self.query_vector_literal(embedding_strs)
+
+    def empty_vector_insert_fragment(self) -> str:
+        raise NotImplementedError
+
+    def distance_operator(self, distance_strategy: str) -> str:
+        raise NotImplementedError
+
+    def build_vector_index_sql(
+            self, table_q: str, col_q: str, distance_strategy: str, embedding_dimensions: int) -> str:
+        raise NotImplementedError
+
+    def bm25_index_sqls(self, table_q: str, bm25_fields: List[str]) -> List[str]:
+        raise NotImplementedError
+
+    def build_search_text_sql(
+            self, table_q: str, bm25_field: List[str], query: str, topk: int, version: str = '') -> str:
+        raise NotImplementedError
+
+
+class GaussDbVectorSqlBackend(VectorSqlBackend):
+    """GaussDB: floatvector, gsdiskann, ### BM25."""
+
+    dialect_id = VECTOR_SQL_DIALECT_GAUSSDB
+
+    def vector_column_type_sql(self, dimension: int) -> str:
+        return f'floatvector({dimension})'
+
+    def query_vector_literal(self, embedding_strs: List[str]) -> str:
+        return '\'[' + ','.join(embedding_strs) + ']\''
+
+    def empty_vector_insert_fragment(self) -> str:
+        return '\'[]\''
+
+    def distance_operator(self, distance_strategy: str) -> str:
+        return '<->'
+
+    def build_vector_index_sql(
+            self, table_q: str, col_q: str, distance_strategy: str, embedding_dimensions: int) -> str:
+        return (
+            f'CREATE INDEX ON {table_q} USING '
+            f'gsdiskann({col_q} {distance_strategy}) '
+            f'WITH (pq_nseg={embedding_dimensions}, '
+            f'pq_nclus={DEFAULT_NCLUS}, queue_size={DEFAULT_QUEUE_SIZE}, '
+            f'num_parallels={DEFAULT_NUM_PARALLELS}, enable_pq=true)')
+
+    def bm25_index_sqls(self, table_q: str, bm25_fields: List[str]) -> List[str]:
+        if not bm25_fields:
+            return []
+        bm25_fields_joined = ','.join(bm25_fields)
+        return [
+            (f'CREATE INDEX ON {table_q} USING bm25({bm25_fields_joined}) '
+             f'WITH (num_parallels={DEFAULT_NUM_PARALLELS})')
+        ]
+
+    def build_search_text_sql(
+            self, table_q: str, bm25_field: List[str], query: str, topk: int, version: str = '') -> str:
+        if not bm25_field:
+            raise ValueError('bm25_field is empty; text search is not configured for this table.')
+        bm25_fields = ','.join(bm25_field)
+        sql = f'SELECT /*+ no tablescan({table_q})*/ * FROM {table_q} '
+        if version:
+            sql += f'WHERE version=\'{escape_single_quote(version)}\' '
+        sql += (f'ORDER BY "{escape_double_quote(bm25_fields)}" ### '
+                f'\'{escape_single_quote(query)}\' desc LIMIT {topk}')
+        return sql
+
+
+class OpenGaussDataVecSqlBackend(VectorSqlBackend):
+    """openGauss DataVec: vector type, diskann/ivfflat/hnsw, <&> BM25."""
+
+    dialect_id = VECTOR_SQL_DIALECT_OPENGAUSS
+
+    @staticmethod
+    def _index_method() -> str:
+        v = (global_vars.configs.get(DB_KEY, 'opengauss_vector_index', fallback='diskann') or 'diskann').strip().lower()
+        if v not in ('diskann', 'ivfflat', 'hnsw'):
+            return 'diskann'
+        return v
+
+    @staticmethod
+    def _opclass(distance_strategy: str) -> str:
+        s = (distance_strategy or DEFAULT_DISTANCE_STRATEGY).lower()
+        if s == 'cosine':
+            return 'vector_cosine_ops'
+        if s == 'inner':
+            return 'vector_ip_ops'
+        return 'vector_l2_ops'
+
+    @staticmethod
+    def _order_op(distance_strategy: str) -> str:
+        s = (distance_strategy or DEFAULT_DISTANCE_STRATEGY).lower()
+        if s == 'cosine':
+            return '<=>'
+        if s == 'inner':
+            return '<#>'
+        return '<->'
+
+    def vector_column_type_sql(self, dimension: int) -> str:
+        return f'vector({dimension})'
+
+    def query_vector_literal(self, embedding_strs: List[str]) -> str:
+        return '\'[' + ','.join(embedding_strs) + ']\'::vector'
+
+    def empty_vector_insert_fragment(self) -> str:
+        return '\'[]\'::vector'
+
+    def distance_operator(self, distance_strategy: str) -> str:
+        return self._order_op(distance_strategy)
+
+    def build_vector_index_sql(
+            self, table_q: str, col_q: str, distance_strategy: str, embedding_dimensions: int) -> str:
+        opclass = self._opclass(distance_strategy)
+        method = self._index_method()
+        cfg = global_vars.configs
+        if method == 'ivfflat':
+            lists = int((cfg.get(DB_KEY, 'opengauss_ivfflat_lists', fallback='100') or '100'))
+            return (f'CREATE INDEX ON {table_q} USING ivfflat ({col_q} {opclass}) '
+                    f'WITH (lists = {lists})')
+        if method == 'hnsw':
+            m = int((cfg.get(DB_KEY, 'opengauss_hnsw_m', fallback='16') or '16'))
+            ef = int((cfg.get(DB_KEY, 'opengauss_hnsw_ef_construction', fallback='64') or '64'))
+            return (f'CREATE INDEX ON {table_q} USING hnsw ({col_q} {opclass}) '
+                    f'WITH (m = {m}, ef_construction = {ef})')
+        index_size = int((cfg.get(DB_KEY, 'opengauss_diskann_index_size', fallback='50') or '50'))
+        return (f'CREATE INDEX ON {table_q} USING diskann ({col_q} {opclass}) '
+                f'WITH (index_size = {index_size})')
+
+    def bm25_index_sqls(self, table_q: str, bm25_fields: List[str]) -> List[str]:
+        if not bm25_fields:
+            return []
+        return [
+            f'CREATE INDEX ON {table_q} USING bm25("{escape_double_quote(col)}")'
+            for col in bm25_fields
+        ]
+
+    def build_search_text_sql(
+            self, table_q: str, bm25_field: List[str], query: str, topk: int, version: str = '') -> str:
+        if not bm25_field:
+            raise ValueError('bm25_field is empty; text search is not configured for this table.')
+        doc_col = bm25_field[0]
+        if len(bm25_field) > 1:
+            logging.warning(
+                'openGauss BM25 supports a single TEXT column per index; using first bm25_field %r.', doc_col)
+        sql = f'SELECT * FROM {table_q} '
+        if version:
+            sql += f'WHERE version=\'{escape_single_quote(version)}\' '
+        sql += (f'ORDER BY "{escape_double_quote(doc_col)}" <&> '
+                f'\'{escape_single_quote(query)}\' DESC LIMIT {topk}')
+        return sql
 
 
 # Anti-injection handler function
@@ -111,6 +294,7 @@ class GaussDB:
         self.serial_field = vector_config.get('serial_field', [])
         self.int_field = vector_config.get('int_field', [])
         self.cols = get_column_name(vector_config)
+        self.vector_sql_backend = get_vector_sql_backend()
 
         self.mem_db_conn = None
         self.cur = None
@@ -125,9 +309,9 @@ class GaussDB:
                 fields.append(f'"{escape_double_quote(field)}"' + ' Integer')
             else:
                 fields.append(f'"{escape_double_quote(field)}"' + ' TEXT')
+        vtype = self.vector_sql_backend.vector_column_type_sql(dimension)
         for embedding_key in embedding_keys:
-            fields.append(f'"{escape_double_quote(embedding_key + "_vector")}"' + " floatvector({dimension})".format(
-                dimension=dimension))
+            fields.append(f'"{escape_double_quote(embedding_key + "_vector")}" {vtype}')
         return ','.join(fields)
 
     def _get_table_count(self):
@@ -180,16 +364,19 @@ class GaussDB:
             embedding_key = self.embedding_keys[0]
         embedding = await self.embedding_function.query_embedding(query)
         embedding_str = [str(num) for num in embedding]
-        query_sql = '\'[' + ','.join(embedding_str) + ']\''
+        query_sql = self.vector_sql_backend.query_vector_literal(embedding_str)
+        dist_op = self.vector_sql_backend.distance_operator(self.distance_strategy)
         sql = f'SELECT * FROM "{escape_double_quote(self.db_index)}" '
         if version:
             sql += f'WHERE version=\'{escape_single_quote(version)}\' '
-        sql += f'ORDER BY "{escape_double_quote(embedding_key + "_vector")}" <-> {query_sql} LIMIT {topk}'
+        sql += (f'ORDER BY "{escape_double_quote(embedding_key + "_vector")}" '
+                f'{dist_op} {query_sql} LIMIT {topk}')
         if distance != 2:
             cur_fields = [f'"{escape_double_quote(field)}"' for field in self.fields]
-            sql = f'SELECT "{escape_double_quote(embedding_key + "_vector")}" <-> {query_sql} as dist, ' \
-                  f'{(",".join(cur_fields))} FROM "{escape_double_quote(self.db_index)}" ' \
-                  f'where dist<={distance} ORDER BY dist LIMIT {topk}'
+            sql = (f'SELECT "{escape_double_quote(embedding_key + "_vector")}" '
+                   f'{dist_op} {query_sql} as dist, '
+                   f'{(",".join(cur_fields))} FROM "{escape_double_quote(self.db_index)}" '
+                   f'where dist<={distance} ORDER BY dist LIMIT {topk}')
         check_sql_valid(sql)
         self._connect()
         self.cur.execute(sql)
@@ -199,12 +386,9 @@ class GaussDB:
 
     def search_text(self, query: str, topk: int, version=""):
         """Function text search."""
-        bm25_fields = ','.join(self.bm25_field)
-        sql = f'SELECT /*+ no tablescan("{escape_double_quote(self.db_index)}")*/ * FROM ' \
-              f'"{escape_double_quote(self.db_index)}" '
-        if version:
-            sql += f'WHERE version=\'{escape_single_quote(version)}\' '
-        sql += f'ORDER BY "{escape_double_quote(bm25_fields)}" ### \'{escape_single_quote(query)}\' desc LIMIT {topk}'
+        table_q = f'"{escape_double_quote(self.db_index)}"'
+        sql = self.vector_sql_backend.build_search_text_sql(
+            table_q, self.bm25_field, query, topk, version)
         self._connect()
         check_sql_valid(sql)
         self.cur.execute(sql)
@@ -324,10 +508,10 @@ class GaussDB:
         insert_string = '(\'' + '\',\''.join(value) + '\''
         if embedding_list:
             for embedding_str in embedding_list:
-                insert_string += ',\'[' + ','.join(embedding_str) + ']\''
+                insert_string += ',' + self.vector_sql_backend.insert_vector_literal(embedding_str)
         else:
             for _ in self.embedding_keys:
-                insert_string += ',\'[]\''
+                insert_string += ',' + self.vector_sql_backend.empty_vector_insert_fragment()
         insert_string += ')'
         return insert_string
 
@@ -351,23 +535,25 @@ class GaussDB:
 
     def _create_index_vector(self):
         """Function creating vector index."""
+        if not self.embedding_keys:
+            return
         self.cur.execute('set maintenance_work_mem=1024000')
+        table_q = f'"{escape_double_quote(self.db_index)}"'
         for embedding_key in self.embedding_keys:
-            index_sql = f'CREATE INDEX ON "{escape_double_quote(self.db_index)}" USING ' \
-                        f'gsdiskann("{escape_double_quote(embedding_key + "_vector")}" {self.distance_strategy}) ' \
-                        f'WITH (pq_nseg={self.embedding_function.get_embedding_dimensions()}, ' \
-                        f'pq_nclus={DEFAULT_NCLUS}, queue_size={DEFAULT_QUEUE_SIZE}, ' \
-                        f'num_parallels={DEFAULT_NUM_PARALLELS}, enable_pq=true)'
+            col_q = f'"{escape_double_quote(embedding_key + "_vector")}"'
+            index_sql = self.vector_sql_backend.build_vector_index_sql(
+                table_q, col_q, self.distance_strategy, self.embedding_function.get_embedding_dimensions())
             check_sql_valid(index_sql)
             self.cur.execute(index_sql)
 
     def _create_index_bm25(self):
         """Function creating bm25 index."""
-        bm25_fields = ','.join(self.bm25_field)
-        bm25_index_sql = f'CREATE INDEX ON "{escape_double_quote(self.db_index)}" USING bm25({bm25_fields}) ' \
-                         f'WITH (num_parallels={DEFAULT_NUM_PARALLELS})'
-        check_sql_valid(bm25_index_sql)
-        self.cur.execute(bm25_index_sql)
+        if not self.bm25_field:
+            return
+        table_q = f'"{escape_double_quote(self.db_index)}"'
+        for bm25_index_sql in self.vector_sql_backend.bm25_index_sqls(table_q, self.bm25_field):
+            check_sql_valid(bm25_index_sql)
+            self.cur.execute(bm25_index_sql)
 
     @print_progress("Creating index.")
     def _create_index(self):
@@ -462,6 +648,7 @@ class SQLCreator:
         self.fields = table_config.get('text_field', [])
         self.serial_field = table_config.get('serial_field', [])
         self.cols = get_column_name(table_config)
+        self.vector_sql_backend = get_vector_sql_backend()
 
     def get_create_table_sql(self):
         """Function get create table sql."""
@@ -471,9 +658,12 @@ class SQLCreator:
                 fields.append(f'"{escape_double_quote(field)}"' + ' serial')
             else:
                 fields.append(f'"{escape_double_quote(field)}"' + ' TEXT')
+        dim = 1024
+        if hasattr(self.embedding_function, 'get_embedding_dimensions'):
+            dim = self.embedding_function.get_embedding_dimensions()
+        vtype = self.vector_sql_backend.vector_column_type_sql(dim)
         for embedding_key in self.embedding_keys:
-            fields.append(f'"{escape_double_quote(embedding_key + "_vector")}"' + " floatvector({dimension})".format(
-                dimension=1024))
+            fields.append(f'"{escape_double_quote(embedding_key + "_vector")}" {vtype}')
         fields_str = ','.join(fields)
         sql = f'CREATE TABLE IF NOT EXISTS "{escape_double_quote(self.table_name)}" ({fields_str}) ' \
               f'with (orientation=ROW, storage_type=astore)'
@@ -512,22 +702,22 @@ class SQLCreator:
     def get_create_index_vector_sql(self):
         """Function creating vector index."""
         sql_list = []
+        if not self.embedding_keys:
+            return sql_list
         sql_list.append('set maintenance_work_mem=1024000')
+        table_q = f'"{escape_double_quote(self.table_name)}"'
         for embedding_key in self.embedding_keys:
-            index_sql = f'CREATE INDEX ON "{escape_double_quote(self.table_name)}" USING ' \
-                        f'gsdiskann("{escape_double_quote(embedding_key + "_vector")}" {self.distance_strategy}) ' \
-                        f'WITH (pq_nseg={self.embedding_function.get_embedding_dimensions()}, ' \
-                        f'pq_nclus={DEFAULT_NCLUS}, queue_size={DEFAULT_QUEUE_SIZE}, ' \
-                        f'num_parallels={DEFAULT_NUM_PARALLELS}, enable_pq=true)'
+            col_q = f'"{escape_double_quote(embedding_key + "_vector")}"'
+            index_sql = self.vector_sql_backend.build_vector_index_sql(
+                table_q, col_q, self.distance_strategy,
+                self.embedding_function.get_embedding_dimensions())
             sql_list.append(index_sql)
         return sql_list
 
-    def get_create_index_bm25_sql(self):
-        """Function creating bm25 index."""
-        bm25_fields = ','.join(self.bm25_field)
-        bm25_index_sql = f'CREATE INDEX ON "{escape_double_quote(self.table_name)}" USING bm25({bm25_fields}) ' \
-                         f'WITH (num_parallels={DEFAULT_NUM_PARALLELS})'
-        return bm25_index_sql
+    def get_create_index_bm25_sqls(self):
+        """Return BM25 index DDL statements (openGauss: one per TEXT column)."""
+        table_q = f'"{escape_double_quote(self.table_name)}"'
+        return self.vector_sql_backend.bm25_index_sqls(table_q, self.bm25_field)
 
     async def get_search_vector_sql(self, query: str, topk: int, embedding_key=None, distance=2):
         """Function vector search."""
@@ -535,23 +725,23 @@ class SQLCreator:
             embedding_key = self.embedding_keys[0]
         embedding = await self.embedding_function.query_embedding(query)
         embedding_str = [str(num) for num in embedding]
-        query_sql = '\'[' + ','.join(embedding_str) + ']\''
-        sql = f'SELECT * FROM "{escape_double_quote(self.table_name)}" ' \
-              f'ORDER BY "{escape_double_quote(embedding_key + "_vector")}" <-> {query_sql} LIMIT {topk}'
+        query_sql = self.vector_sql_backend.query_vector_literal(embedding_str)
+        dist_op = self.vector_sql_backend.distance_operator(self.distance_strategy)
+        sql = (f'SELECT * FROM "{escape_double_quote(self.table_name)}" '
+               f'ORDER BY "{escape_double_quote(embedding_key + "_vector")}" '
+               f'{dist_op} {query_sql} LIMIT {topk}')
         if distance != 2:
             cur_fields = [f'"{escape_double_quote(field)}"' for field in self.fields]
-            sql = f'SELECT "{escape_double_quote(embedding_key + "_vector")}" <-> {query_sql} as dist, ' \
-                  f'{(",".join(cur_fields))} FROM "{escape_double_quote(self.table_name)}" ' \
-                  f'where dist<={distance} ORDER BY dist LIMIT {topk}'
+            sql = (f'SELECT "{escape_double_quote(embedding_key + "_vector")}" '
+                   f'{dist_op} {query_sql} as dist, '
+                   f'{(",".join(cur_fields))} FROM "{escape_double_quote(self.table_name)}" '
+                   f'where dist<={distance} ORDER BY dist LIMIT {topk}')
         return sql
 
     def get_search_text_sql(self, query: str, topk: int):
         """Function text search."""
-        bm25_fields = ','.join(self.bm25_field)
-        sql = f'SELECT /*+ no tablescan("{escape_double_quote(self.table_name)}")*/ * ' \
-              f'FROM "{escape_double_quote(self.table_name)}" ORDER BY "{escape_double_quote(bm25_fields)}" ' \
-              f'### \'{escape_single_quote(query)}\' desc LIMIT {topk}'
-        return sql
+        table_q = f'"{escape_double_quote(self.table_name)}"'
+        return self.vector_sql_backend.build_search_text_sql(table_q, self.bm25_field, query, topk, '')
 
     def get_content_from_uuid_sql(self, uuid: str):
         """Function get record from uuid."""
@@ -724,10 +914,10 @@ class SQLCreator:
         insert_string = '(\'' + '\',\''.join(value) + '\''
         if embedding_list:
             for embedding_str in embedding_list:
-                insert_string += ',\'[' + ','.join(embedding_str) + ']\''
+                insert_string += ',' + self.vector_sql_backend.insert_vector_literal(embedding_str)
         else:
             for _ in self.embedding_keys:
-                insert_string += ',\'[]\''
+                insert_string += ',' + self.vector_sql_backend.empty_vector_insert_fragment()
         insert_string += ')'
         return insert_string
 
@@ -786,8 +976,8 @@ async def init_documents(docs, table_name, table_config, need_index=False):
         if need_index:
             sql_list = sql_creator.get_create_index_vector_sql()
             db_executor.exec_sql_list(sql_list)
-            sql = sql_creator.get_create_index_bm25_sql()
-            db_executor.exec_sql(sql)
+            for bm25_sql in sql_creator.get_create_index_bm25_sqls():
+                db_executor.exec_sql(bm25_sql)
     except Exception as e:
         db_executor.close(commit=False)
         raise Exception(f"init document failed because: {str(e)}") from e
@@ -964,8 +1154,8 @@ async def add_knowledge(record_dict, file_list, save_root):
                 docs.append(doc)
             sql_list = await kt_sql_creator.get_batch_insert_sql(docs)
             db_executor.exec_sql_list(sql_list)
-        sql = kt_sql_creator.get_create_index_bm25_sql()
-        db_executor.exec_sql(sql)
+        for bm25_sql in kt_sql_creator.get_create_index_bm25_sqls():
+            db_executor.exec_sql(bm25_sql)
         db_executor.close()
     except Exception as e:
         db_executor.close(commit=False)

@@ -26,6 +26,7 @@ from GaussMaster.common.metadatabase.schema import InteractionMemory
 from GaussMaster.common.security import Encryption
 from GaussMaster.common.utils.base import adjust_timezone, stream_exception_catcher
 from GaussMaster.llms import llm_registry
+from GaussMaster.llms.model_utils import resolve_model_backend, resolve_api_key, resolve_remote_model_name
 from GaussMaster.llms.executor import infer_tool_name, check_is_no_param_tool, \
     check_has_valid_tool, call_tool, infer_arguments, verify_arguments
 from GaussMaster.llms.llm_utils import InteractionType
@@ -60,9 +61,18 @@ def instantiate_llm(model_name: str):
     if not model_params:
         raise ValueError(f"The model {model_name} is not registered.")
 
-    model_type = model_params.get('api_type')
+    model_type = resolve_model_backend(model_params)
     api_url = model_params.get('api_url')
-    llm = llm_registry.get(model_type)(model_name, api_url)
+    api_key = resolve_api_key(model_params)
+    remote_model_name = resolve_remote_model_name(model_name, model_params)
+    request_defaults = model_params.get('request_defaults') or model_params.get('recommended_config') or {}
+    llm_cls = llm_registry.get(model_type)
+    if not llm_cls:
+        raise ValueError(f"The model backend {model_type} is not registered.")
+    if model_type == 'OpenAICompatible':
+        llm = llm_cls(remote_model_name, api_url, api_key=api_key, request_defaults=request_defaults)
+    else:
+        llm = llm_cls(remote_model_name, api_url, api_key=api_key)
     return llm
 
 

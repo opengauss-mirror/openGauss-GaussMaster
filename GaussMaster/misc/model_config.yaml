@@ -17,6 +17,13 @@ reranker_model:
   api_url: http://*.*.*.*:*/get_reranker_result
 
 # large language model
+#
+# OpenAI 兼容接口：api_type 可写 OpenAICompatible（实现类名）或 DeepSeek（厂商名，与 Baichuan 写法一致）
+#   - api_url、enable、recommended_config（与 recommended_config 同义的 request_defaults 也可，代码里二选一读取）
+#   - api_key_env：Bearer 密钥对应的环境变量名（可选 fallback：LLM_API_KEY / 配置里的 api_key）
+#   - 本地 vLLM / Ollama(OpenAI 兼容) / LM Studio 等无鉴权时：api_key_optional: true，可不设 Key、不写 Authorization
+#   - 若上游 model 名与本节键名不同，再增加 model: <上游 id>
+# 不支持、需另写适配：Anthropic/Gemini 原生 API、Azure api-key 头等。
 online_llm:
   pangu_sigma_unify_plugin_38b:
     enable: True
@@ -53,3 +60,39 @@ online_llm:
     recommended_config:
       temperature: 0.7
       top_p: 1.0
+  deepseek-chat:
+    enable: False
+    api_type: DeepSeek
+    api_url: https://api.deepseek.com/v1/chat/completions
+    api_key_env: DEEPSEEK_API_KEY
+    recommended_config:
+      temperature: 0.7
+      top_p: 0.95
+      stream: true
+  gpt-4o-mini:
+    enable: False
+    api_type: OpenAICompatible
+    api_url: https://api.openai.com/v1/chat/completions
+    api_key_env: OPENAI_API_KEY
+    recommended_config:
+      temperature: 0.7
+      top_p: 1.0
+      stream: true
+  moonshot-v1-8k:
+    enable: False
+    api_type: OpenAICompatible
+    api_url: https://api.moonshot.cn/v1/chat/completions
+    api_key_env: MOONSHOT_API_KEY
+    recommended_config:
+      temperature: 0.7
+      top_p: 1.0
+      stream: true
+  # 本地 OpenAI 兼容服务示例（vLLM: --served-model-name 与 model 一致）
+  local-vllm-chat:
+    enable: False
+    api_type: OpenAICompatible
+    api_url: http://127.0.0.1:8000/v1/chat/completions
+    api_key_optional: true
+    recommended_config:
+      temperature: 0.7
+      stream: true

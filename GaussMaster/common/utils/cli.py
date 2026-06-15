@@ -108,6 +108,15 @@ def read_input_from_pipe():
     """
     Read stdin input if there is "echo 'str1 str2' | python xx.py", return the input string.
     """
+    # Windows: select() on stdin is unreliable; read piped JSON when stdin is not a TTY.
+    if sys.platform == 'win32':
+        if not sys.stdin.isatty():
+            try:
+                return sys.stdin.read().strip()
+            except Exception:
+                return ""
+        return ""
+
     if not LINUX:
         return ""
 
@@ -161,7 +170,9 @@ def raise_fatal_and_exit(
 def check_connectivity_parallely(service_params_list, terminal_output=False):
     """
     check connectivity of all services parallely
-    service_params_list is a list of tuples (url: str, ssl_config: dict, model_name=None)
+    service_params_list is a list of tuples:
+      (url, ssl_context, model_name) or
+      (url, ssl_context, model_name, api_key, model_config)
     """
     available_services = []
     with ThreadPoolExecutor(max_workers=10) as executor:
@@ -177,17 +188,16 @@ def check_connectivity_parallely(service_params_list, terminal_output=False):
     return available_services
 
 
-def check_url_connectivity(url: str, ssl_context, model_name=None):
+def check_url_connectivity(url: str, ssl_context, model_name=None, api_key=None, model_config=None):
     """
     Function to check the connectivity of a given URL.
 
     Parameters:
     url (str): The URL to be checked.
     ssl_context: ssl_context
-
-    Raises:
-    If the connection to the URL results in a ConnectionError, Timeout, or any RequestException,
-    the respective exception will be raised.
+    model_name: optional service label (embedding_model / reranker_model / llm id)
+    api_key: optional Bearer token
+    model_config: optional dict with model_name for request body
 
     returns:
     whether the url is reachable or not, llm name, message
@@ -198,16 +208,35 @@ def check_url_connectivity(url: str, ssl_context, model_name=None):
             return f"{service_name}: {output}"
         return output
 
+    if not url or not str(url).strip():
+        msg = "URL is empty or not configured."
+        return False, model_name, _generate_msg(msg, model_name)
+
+    headers = {}
+    if api_key:
+        headers['Authorization'] = f'Bearer {api_key}'
+
     try:
         with create_requests_session(ssl_context=ssl_context) as session:
-            response = session.get(url, timeout=5)
+            if 'embeddings' in url.lower():
+                model = model_config.get('model_name', 'BAAI/bge-large-zh-v1.5') if model_config else 'BAAI/bge-large-zh-v1.5'
+                test_data = {"input": "test", "model": model}
+                response = session.post(url, json=test_data, headers=headers, timeout=10)
+            elif 'rerank' in url.lower():
+                model = model_config.get('model_name', 'BAAI/bge-reranker-v2-m3') if model_config else 'BAAI/bge-reranker-v2-m3'
+                test_data = {"query": "test", "documents": ["test"], "model": model}
+                response = session.post(url, json=test_data, headers=headers, timeout=10)
+            else:
+                test_model = model_config.get('model_name', 'Qwen/Qwen2.5-7B-Instruct') if model_config else 'Qwen/Qwen2.5-7B-Instruct'
+                test_data = {"model": test_model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5}
+                response = session.post(url, json=test_data, headers=headers, timeout=10)
     except requests.exceptions.ConnectTimeout:
         msg = f"Timeout connecting to the service {url}."
         return False, model_name, _generate_msg(msg, model_name)
     except Exception as e:
         return False, model_name, _generate_msg(str(e), model_name)
     if response.status_code not in (200, 405, 422):
-        msg = f"The service '{url}' returned status code: {response.status_code}."
+        msg = f"The service '{url}' returned status code: {response.status_code}. Response: {response.text[:200]}"
         return False, model_name, _generate_msg(msg, model_name)
     msg = f"The service '{url}' is available."
     return True, model_name, _generate_msg(msg, model_name)

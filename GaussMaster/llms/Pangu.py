@@ -47,8 +47,10 @@ class Pangu(BaseLLM):
     headers = {'Content-Type': 'application/json; charset=utf-8', 'Accept-Charset': 'utf-8'}
     data = {}
 
-    def __init__(self, model, url, temperature=0.0, stream=False):
+    def __init__(self, model, url, temperature=0.0, stream=False, api_key=None):
         super().__init__(model, url, temperature, stream)
+        if api_key:
+            self.headers['Authorization'] = f'Bearer {api_key}'
         self.data = {
             'stream': stream,
             'messages': [],

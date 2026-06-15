@@ -38,6 +38,7 @@ from GaussMaster.common.utils.checking import split_ip_port
 from GaussMaster.common.utils.cli import check_url_connectivity, check_connectivity_parallely
 from GaussMaster.constants import GAUSSMASTER_PATH, VERSION_SUPPORT_LIST, LANGUAGES_SUPPORT_LIST, CUSTOM_KB_PREFIX, \
     REPORT_SUPPORT_LIST, FILE_MAX_SIZE, SUFFIX_SUPPORT_LIST, KB_TYPE_SUPPORT_LIST, SECTION_SAFETY
+from GaussMaster.llms.model_utils import resolve_api_key, resolve_remote_model_name
 from GaussMaster.llms.llm_utils import InteractionType
 from GaussMaster.multiagents.agents.dba import interact
 from GaussMaster.multiagents.tools import base_tools
@@ -46,7 +47,13 @@ from GaussMaster.server.web.context_manager import set_user_current_instance, se
     current_instance
 from GaussMaster.server.web.jsonify_utils import sqlalchemy_query_jsonify
 from GaussMaster.utils.prompt_util import get_hyde_prompt, get_query_transform_prompt, get_infer_prompt
-from GaussMaster.utils.retriever_util import BaseRetriever, OnlineEmbedding, OnlineReranker
+from GaussMaster.utils.retriever_util import (
+    BaseRetriever,
+    DisabledOnlineEmbedding,
+    DisabledOnlineReranker,
+    OnlineEmbedding,
+    OnlineReranker,
+)
 from GaussMaster.utils.ui_output_util import formatter_divider, formatter_str, formatter_table, formatter_title
 
 ORDER_LIST_PATTERN = r'^\d+\.(\s+)'  # 有序列表
@@ -132,19 +139,42 @@ def get_all_models() -> dict:
     return llms
 
 
+def _embedding_reranker_service_ready(cfg: dict) -> bool:
+    if not cfg.get("enable", True):
+        return False
+    url = (cfg.get("api_url") or "").strip()
+    if not url or "*" in url:
+        return False
+    return True
+
+
 def initialize_embedding_model():
     """
     initialize embedding and reranker model
     """
-    embedding_model_api_url = global_vars.llm_config.get("embedding_model").get("api_url")
-    reranker_model_api_url = global_vars.llm_config.get("reranker_model").get("api_url")
+    embedding_config = global_vars.llm_config.get("embedding_model", {})
+    reranker_config = global_vars.llm_config.get("reranker_model", {})
+    embedding_model_api_url = embedding_config.get("api_url")
+    reranker_model_api_url = reranker_config.get("api_url")
+    embedding_api_key = resolve_api_key(embedding_config)
+    reranker_api_key = resolve_api_key(reranker_config)
     connectivity_params = []
-    for url, model_name, model_class in zip([embedding_model_api_url, reranker_model_api_url],
-                                            ['embedding_model', 'reranker_model'],
-                                            [OnlineEmbedding, OnlineReranker],
-                                            ):
-        setattr(global_vars, model_name, model_class(url, get_ssl_context()))
-        connectivity_params.append((url, get_ssl_context(), model_name))
+    ssl_ctx = get_ssl_context()
+    for url, model_name, model_class, api_key, model_cfg, disabled_cls in zip(
+        [embedding_model_api_url, reranker_model_api_url],
+        ["embedding_model", "reranker_model"],
+        [OnlineEmbedding, OnlineReranker],
+        [embedding_api_key, reranker_api_key],
+        [embedding_config, reranker_config],
+        [DisabledOnlineEmbedding, DisabledOnlineReranker],
+    ):
+        if not _embedding_reranker_service_ready(model_cfg):
+            setattr(global_vars, model_name, disabled_cls(None, ssl_ctx, api_key=api_key))
+            continue
+        setattr(global_vars, model_name, model_class(url, ssl_ctx, api_key=api_key))
+        connectivity_params.append((url, ssl_ctx, model_name, api_key, model_cfg))
+    if not connectivity_params:
+        return True
     return check_connectivity_parallely(connectivity_params, True)
 
 
@@ -154,7 +184,11 @@ def get_all_available_online_llms(terminal_output=False) -> list:
     for llm_name, detail in global_vars.llm_config.get('online_llm').items():
         if detail.get('enable'):
             api_url = detail.get('api_url')
-            llm_candidates_params.append((api_url, get_ssl_context(), llm_name))
+            model_config = {**detail}
+            model_config['model_name'] = resolve_remote_model_name(llm_name, detail)
+            llm_candidates_params.append(
+                (api_url, get_ssl_context(), llm_name, resolve_api_key(detail), model_config)
+            )
     available_llms = check_connectivity_parallely(llm_candidates_params, terminal_output)
     return available_llms
 
@@ -166,8 +200,12 @@ def switch_llm(name, user_id, session_id):
             raise ValueError('LLM name is not correct.')
         if not global_vars.llm_config.get('online_llm').get(name).get('enable'):
             raise ValueError(f'The LLM service of {name} is not available.')
-        api_url = global_vars.llm_config.get('online_llm').get(name).get('api_url')
-        is_valid, _, msg = check_url_connectivity(api_url, get_ssl_context())
+        model_config = global_vars.llm_config.get('online_llm').get(name)
+        api_url = model_config.get('api_url')
+        api_key = resolve_api_key(model_config)
+        validate_config = {**model_config}
+        validate_config['model_name'] = resolve_remote_model_name(name, model_config)
+        is_valid, _, msg = check_url_connectivity(api_url, get_ssl_context(), name, api_key, validate_config)
         if not is_valid:
             logging.error(msg)
             return False
@@ -316,7 +354,10 @@ async def infer(question, question_id, user_id, session_id, switch, model_name, 
     except Exception as e:
         raise Exception(f'can not get llm result, because: {e}.') from e
     finally:
-        gaussdb_vector.insert_qa_record(qa_dict)
+        try:
+            gaussdb_vector.insert_qa_record(qa_dict)
+        except Exception:
+            logging.warning('insert_qa_record failed (metadatabase may be offline).', exc_info=True)
 
 
 def create_infer_prompt_direct(question, search_res, history, lang):
@@ -370,25 +411,34 @@ def create_infer_prompt(question, search_res, history, lang):
 @timer_decorator
 def get_history_chat(user_id, session_id, history_len):
     """Function get history chat"""
-    gaussdb = get_db_instance(kb_config.QA_TABLE_NAME, kb_config.QA_TABLE_CONFIG)
-    column_list = gaussdb.cols
-    history_list = gaussdb.get_history_record(user_id, session_id, history_len)
-    history = []
-    for history_info in history_list:
-        history_dict = {}
-        history_dict['question'] = history_info[column_list.index('question')]
-        history_dict['answer'] = history_info[column_list.index('answer')]
-        history_dict['lang'] = history_info[column_list.index('lang')]
-        history.append(history_dict)
-    return history
+    try:
+        gaussdb = get_db_instance(kb_config.QA_TABLE_NAME, kb_config.QA_TABLE_CONFIG)
+        column_list = gaussdb.cols
+        history_list = gaussdb.get_history_record(user_id, session_id, history_len)
+        history = []
+        for history_info in history_list:
+            history_dict = {}
+            history_dict['question'] = history_info[column_list.index('question')]
+            history_dict['answer'] = history_info[column_list.index('answer')]
+            history_dict['lang'] = history_info[column_list.index('lang')]
+            history.append(history_dict)
+        return history
+    except Exception:
+        logging.warning('get_history_chat failed; continuing without chat history.', exc_info=True)
+        return []
 
 
 def request_from_llm(url, headers, params):
     """Function request from llm."""
     try:
         with create_requests_session(ssl_context=get_ssl_context()) as session:
-            with session.request(method="POST", url=url, headers=headers, data=json.dumps(params),
+            with session.request(method="POST", url=url, headers=headers, json=params,
                                  stream=True) as response:
+                if response.status_code >= 400:
+                    text = response.text[:500] if response.text else ''
+                    raise Exception(
+                        f'LLM HTTP {response.status_code}: {text}'
+                    )
                 for chunk in response.iter_content(decode_unicode=True):
                     yield chunk
     except Exception as e:
@@ -413,25 +463,90 @@ def iter_next(generator):
         return -1
 
 
+def _sse_line_to_delta_text(line: str) -> str:
+    """Parse one SSE line (OpenAI-compatible) and return delta/message text, or ''."""
+    line = line.strip()
+    if not line or not line.startswith('data:'):
+        return ''
+    payload = line[5:].strip()
+    if payload == '[DONE]':
+        return ''
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        return ''
+    choices = data.get('choices') or []
+    if not choices:
+        return ''
+    delta = choices[0].get('delta')
+    if isinstance(delta, dict) and delta.get('content'):
+        return delta.get('content')
+    message = choices[0].get('message')
+    if isinstance(message, dict) and message.get('content'):
+        return message.get('content')
+    return ''
+
+
+def _iter_sse_delta_texts(body_chunk: str, line_buf: list) -> list:
+    """
+    Append body_chunk to line_buf[0], split on newlines, return delta texts for complete lines.
+    Incomplete tail remains in line_buf[0].
+    """
+    if not isinstance(body_chunk, str):
+        body_chunk = body_chunk.decode('utf-8', errors='replace') if isinstance(body_chunk, (bytes, bytearray)) else str(
+            body_chunk)
+    line_buf[0] += body_chunk
+    out = []
+    while '\n' in line_buf[0]:
+        line, _, rest = line_buf[0].partition('\n')
+        line_buf[0] = rest
+        t = _sse_line_to_delta_text(line)
+        if t:
+            out.append(t)
+    return out
+
+
 async def generate_answer(messages, model_name):
     """Function generate answer."""
     if global_vars.local_llm:
         async for item in global_vars.local_llm.invoke(messages):
             yield item
     else:
-        params = {'messages': messages}
+        llm_config = global_vars.llm_config.get('online_llm').get(model_name, {})
+        request_defaults = llm_config.get('request_defaults') or llm_config.get('recommended_config') or {}
+        params = {
+            'model': resolve_remote_model_name(model_name, llm_config),
+            'messages': messages
+        }
+        params.update(request_defaults)
+        params.setdefault('stream', True)
         headers = {"Accept": "text/event-stream", "Connection": "keep-alive", "Cache-Control": "no-cache"}
-        url = global_vars.llm_config.get('online_llm').get(model_name).get('api_url')
-        is_valid, _, msg = check_url_connectivity(url, get_ssl_context(), model_name)
-        if not is_valid:
-            raise ApiClientException(msg)
+        api_key = resolve_api_key(llm_config)
+        key_optional = bool(llm_config.get('api_key_optional'))
+        if not api_key and not key_optional:
+            env_hint = llm_config.get('api_key_env') or 'LLM_API_KEY'
+            raise ApiClientException(
+                f"{model_name}: API key missing. Set environment variable {env_hint}, "
+                f"or create a .env file in the GaussMaster config directory with that key, "
+                f"or set api_key_optional: true for local OpenAI-compatible servers without auth."
+            )
+        if api_key:
+            headers['Authorization'] = f'Bearer {api_key}'
+
+        url = llm_config.get('api_url')
         try:
             llm_generator = await thread_request_from_llm(url, headers, params)
+            line_buf = ['']
             while True:
                 chunk = await asyncio.get_running_loop().run_in_executor(None, iter_next, llm_generator)
                 if chunk == -1:
                     break
-                yield chunk
+                for text in _iter_sse_delta_texts(chunk, line_buf):
+                    yield text
+            if line_buf[0].strip():
+                tail = _sse_line_to_delta_text(line_buf[0])
+                if tail:
+                    yield tail
         except Exception as e:
             raise Exception(f'can not generate answer, because: {str(e)}.') from e
 
@@ -563,7 +678,10 @@ async def ask_gauss(question, user_id, session_id, switch, vector_topk, text_top
         except Exception as e:
             raise Exception(f'can not get gauss qa result, because: {e}.')
         finally:
-            gaussdb_vector.insert_qa_record(qa_dict)
+            try:
+                gaussdb_vector.insert_qa_record(qa_dict)
+            except Exception:
+                logging.warning('insert_qa_record failed (metadatabase may be offline).', exc_info=True)
 
 
 async def llm_generation(question, search_res, model_name, history, lang):

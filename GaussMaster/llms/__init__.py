@@ -20,3 +20,4 @@ from .Chatglm import Chatglm
 from .Baichuan import Baichuan
 from .Llama import Llama3
 from .pangu_cloud import PanguCloud
+from .OpenAICompatible import OpenAICompatible
