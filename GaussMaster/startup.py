@@ -103,13 +103,11 @@ def init_global_configs(confpath, need_check):
     dbmind_api_prefix = (global_vars.configs.get(DBMIND, 'api_prefix') or '').strip()
     if dbmind_api_prefix.startswith('http://'):
         utils.cli.write_to_terminal(
-            "FATAL: DBMIND service is using an insecure protocol.",
-            color='red')
-        sys.exit(0)
+            "WARN: DBMind service is using an insecure protocol.", color='yellow')
     if dbmind_api_prefix and not dbmind_api_prefix.startswith('https://'):
         utils.cli.write_to_terminal(
-            "WARN: DBMind api_prefix is not https:// (placeholder or invalid); DBMind integration disabled until "
-            "you set a valid https URL.",
+            "WARN: DBMind api_prefix is not https://, that is insecure. "
+            "It is recommended to set a valid HTTPS URL.",
             color='yellow')
     validate_ssl_config(DBMIND)
 
@@ -222,13 +220,11 @@ def check_config(conf_path, need_check):
         dbmind_api_prefix = (config.get(DBMIND, 'api_prefix')[0] or '').strip()
         if dbmind_api_prefix.startswith('http://'):
             utils.cli.write_to_terminal(
-                "FATAL: DBMind service is using an insecure protocol, exit...",
-                color='red')
-            sys.exit(0)
+                "WARN: DBMind service is using an insecure protocol.", color='yellow')
         if dbmind_api_prefix and not dbmind_api_prefix.startswith('https://'):
             utils.cli.write_to_terminal(
-                "WARN: DBMind api_prefix is not https:// (placeholder or invalid); DBMind integration disabled until "
-                "you set a valid https URL.",
+                "WARN: DBMind api_prefix is not https://, that is insecure. "
+                "It is recommended to set a valid HTTPS URL.",
                 color='yellow')
         for section, option in [(SECTION_VECTOR, 'password'), (SECTION_WEB_SERVICE, 'ssl_keyfile_password'),
                                 (DBMIND, 'ssl_keyfile_password')]:
@@ -237,7 +233,7 @@ def check_config(conf_path, need_check):
                 keyfile = (config.get(section, 'ssl_keyfile')[0] or '').strip()
                 # Skip SSL password check if not using SSL or keyfile is not configured
                 if (section == SECTION_WEB_SERVICE and not constants.SSL) or \
-                        not keyfile or keyfile.upper() == '(NULL)':
+                   not keyfile or keyfile.upper() == '(NULL)':
                     continue
                 else:
                     if need_check and password and not check_password_strength(password):
@@ -449,7 +445,7 @@ class Main:
         # Initialize global cluster info
         try:
             init_cluster_info()
-        except Exception:
+        except:
             utils.cli.write_to_terminal('FATAL: Failed to establish to DBMind, please check related configuration',
                                         color='red')
 
