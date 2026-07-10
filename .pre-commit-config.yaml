@@ -1,0 +1,67 @@
+# pre-commit 配置（openGauss-GaussMaster，Python 为主）
+#
+# 策略：沿用 flake8.conf（ignore=F401,W291,W504，max-line-length=120），
+# 格式化(darker)行宽与 flake8 对齐为 120，避免对存量代码制造新噪音。
+#
+# 首次启用：
+#   bash setup-pre-commit.sh
+# 或手动：
+#   pip install pre-commit mypy flake8
+#   pre-commit install
+
+default_language_version:
+  python: python3
+
+# 排除测试脚本目录、文档与非源码
+exclude: '^(docs/|GaussMaster/test/|.*\.min\.js$)'
+
+repos:
+  - repo: https://gitcode.com/gh_mirrors/pr/pre-commit-hooks.git
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-toml
+      - id: check-added-large-files
+      - id: detect-private-key
+
+  - repo: https://gitcode.com/gh_mirrors/co/codespell.git
+    rev: v2.4.1
+    hooks:
+      - id: codespell
+
+  # Lint：走 local 调本机 flake8，读仓库根的 flake8.conf
+  - repo: local
+    hooks:
+      - id: flake8
+        name: flake8 (local, 读 flake8.conf)
+        entry: flake8
+        language: system
+        types: [python]
+        args: ["--config=flake8.conf"]
+
+  - repo: https://gitcode.com/gh_mirrors/ba/bandit.git
+    rev: "1.9.4"
+    hooks:
+      - id: bandit
+        args: ["--ini", ".bandit"]
+
+  # 格式化：darker 行级，行宽 120 对齐 flake8
+  - repo: https://gitcode.com/gh_mirrors/da/darker.git
+    rev: v3.0.0
+    hooks:
+      - id: darker
+        additional_dependencies: ["black==24.10.0"]
+        args: ["--line-length=120"]
+
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (local)
+        entry: mypy
+        language: system
+        types: [python]
+        require_serial: true
+        exclude: '^(tests/|GaussMaster/test/)'

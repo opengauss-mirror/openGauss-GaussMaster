@@ -1,3 +1,6 @@
+# pre-commit 本地隔离环境（由 setup-pre-commit.sh 创建，不提交）
+.pre-commit-venv/
+
 # Python
 __pycache__/
 *.py[cod]
