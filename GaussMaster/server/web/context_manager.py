@@ -51,25 +51,21 @@ def set_current_instance(user_id, session_id):
     """
     Function to set the current instance for a user's session.
 
+    The instance must be bound via the (user_id, session_id) pair. Session-level
+    isolation is enforced: a session that has not been explicitly bound will not
+    silently fall back to the user-level instance.
+
     Parameters:
     user_id (str): The unique identifier for the user.
     session_id (str): The unique identifier for the session.
 
     Raises:
-    ValueError: If the user sessions have not been initialized for the given user ID.
+    ValueError: If no instance has been bound for the given (user_id, session_id).
     """
-    # Ensure the user sessions have been initialized for the given user ID
-    if not global_vars.user_session_instance[user_id]:
-        raise ValueError(f'You must set the instance for {user_id} first.')
-    # Ensure the session does not exist in the global session dictionary for the user
-    if not global_vars.user_session_instance[user_id].get(session_id):
-        last_instance = get_user_current_instance(user_id)
-        logging.info('There is no bound cluster in the current session %s, '
-                     'and the last used cluster %s is used by default.', session_id, last_instance)
-        global_vars.user_session_instance[user_id][session_id] = last_instance
-    # Get the instance for the session
-    instance = global_vars.user_session_instance[user_id][session_id]
-    # Set the current instance
+    instance = global_vars.user_session_instance[user_id].get(session_id)
+    if not instance:
+        raise ValueError(f'You must set the instance for user_id: {user_id} '
+                         f'and session_id: {session_id} first.')
     current_instance.set(instance)
 
 
