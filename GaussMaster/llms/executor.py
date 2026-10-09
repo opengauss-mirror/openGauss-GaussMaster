@@ -12,6 +12,7 @@
 # See the Mulan PSL v2 for more details.
 
 """llm executor"""
+import inspect
 import json
 from datetime import datetime
 
@@ -21,7 +22,7 @@ from GaussMaster.global_vars import LANGUAGE
 from GaussMaster.llms.llm_utils import LLMMsgKey, LLMRole, WEEK_ZH, WEEK_CN, LLMType
 from GaussMaster.llms.prompt import TOOL_INTERACT_ZH, TOOL_INTERACT_EN, TOOL_DES_ZH
 from GaussMaster.multiagents.agents.prompt.dba_prompt import construct_extract_tool_params_prompt
-from GaussMaster.multiagents.tools import base_tools
+from GaussMaster.multiagents.mcp_integration import MCPToolAdapter, all_tools
 from GaussMaster.multiagents.tools.utils import has_correct_params
 from GaussMaster.utils.parse import output_parser
 
@@ -45,11 +46,11 @@ async def infer_tool_name(question: str, user_id, session_id, llm):
     infer tool_name according to question
     """
     if llm.llm_type == LLMType.PANGUCLOUD:
-        _, detail_without_param_dict_list = base_tools.detail_dict_list
+        _, detail_without_param_dict_list = all_tools.detail_dict_list
         tools_des = '\n'.join([json.dumps(tool_des, ensure_ascii=False) for tool_des in detail_without_param_dict_list])
         tools_des = tools_des.replace('{', '{{').replace('}', '}}')
     else:
-        _, detail_without_param_str_list = base_tools.detail_str_list
+        _, detail_without_param_str_list = all_tools.detail_str_list
         tools_des = '\n'.join(detail_without_param_str_list)
 
     tools_des_prompt = (TOOL_DES_ZH.format(functions=tools_des) if LANGUAGE == 'zh'
@@ -71,8 +72,7 @@ def check_is_no_param_tool(tool_name):
     :param tool_name: tool name inferred by llm
     :return: 1: is no_param tool 2: response content 3: tool_dict
     """
-    target_tool = global_vars.tools_registry.get(tool_name, None)
-    # no_param tool doesn't need to extract param
+    target_tool = all_tools.get(tool_name)
     if target_tool and len(target_tool.__param_dict_list__) == 0:
         return True
     return False
@@ -81,9 +81,9 @@ def check_is_no_param_tool(tool_name):
 def check_has_valid_tool(tool_name):
     """
     check whether the question can be tackled by given tools
-    :return: 1: whether the question can be tackled by given tools, 2: target_tool detail description
+    :return: 1. whether the question can be tackled by given tools, 2. target_tool detail description
     """
-    target_tool = global_vars.tools_registry.get(tool_name, None)
+    target_tool = all_tools.get(tool_name)
     return target_tool is not None
 
 
@@ -98,18 +98,29 @@ def verify_arguments(function_call: dict = None):
         arguments = json.loads(function_call.get('arguments'))
     except TypeError:
         arguments = function_call.get('arguments')
-    return has_correct_params(arguments, global_vars.tools_registry.get(func_name))
+    func = all_tools.get(func_name)
+    if func is None:
+        return False, {}, {func_name or 'unknown': False}
+    if isinstance(func, MCPToolAdapter):
+        return func.has_correct_params(arguments)
+    return has_correct_params(arguments, func)
 
 
 @timer_decorator
-def call_tool(tool_name: str, params=None):
+async def call_tool(tool_name: str, params=None):
     """
-    With the tool_name and params ready, start calling the tool
+    With the tool_name and params ready, start calling the tool.
     """
     if params is None:
         params = {}
-    function_result = global_vars.tools_registry.get(tool_name)(**params)
-    return function_result
+    tool = all_tools.get(tool_name)
+    if tool is None:
+        return (f"Tool '{tool_name}' is unavailable "
+                f"(not found or service connection interrupted), please try again later")
+    result = tool(**params)
+    if inspect.isawaitable(result):
+        result = await result
+    return result
 
 
 @timer_decorator
@@ -121,11 +132,14 @@ async def infer_arguments(question, intention_tool, qa_record_history, llm):
     :param qa_record_history: qa record history
     :return: content_resp, function_call
     """
+    target_tool = all_tools.get(intention_tool)
+    if target_tool is None:
+        return f'Tool {intention_tool} is unavailable (service connection interrupted), please try again later', {}
     if llm.llm_type == LLMType.PANGUCLOUD:
-        target_tool_des = json.dumps(base_tools.get(intention_tool).__detail_with_param_dict__)
+        target_tool_des = json.dumps(target_tool.__detail_with_param_dict__)
         target_tool_des = target_tool_des.replace('{', '{{').replace('}', '}}')
     else:
-        target_tool_des = base_tools.get(intention_tool).__detail_with_param_str__
+        target_tool_des = target_tool.__detail_with_param_str__
 
     tz = adjust_timezone(global_vars.configs.get('TIMEZONE', 'tz'))
     propose_prompt_dict = {

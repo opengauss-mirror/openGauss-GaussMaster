@@ -22,7 +22,14 @@ from GaussMaster.common.http import request_mapping
 from GaussMaster.common.http import standardized_api_output
 from GaussMaster.common.http._service_impl import standardized_event_stream_output
 from GaussMaster.common.utils.checking import ParameterChecker
+from GaussMaster import global_vars
 from GaussMaster.multiagents.agents import dba
+from GaussMaster.multiagents.mcp_integration import (
+    get_mcp_server_status,
+    reload_mcp_servers,
+    serialize_server_status,
+    ServerStatus,
+)
 from GaussMaster.multiagents.tools.dbmind_interface import retrieve_clusters_status
 from GaussMaster.server.web import data_transformer
 from GaussMaster.server.web.context_manager import switch_llm_context_decorator, current_llm
@@ -85,6 +92,41 @@ def put_clusters(user_id, session_id, instance):
 )
 def register_cluster(cluster: Cluster):
     return data_transformer.register_cluster(cluster)
+
+
+def _mcp_status_response(results) -> dict:
+    """Build the unified MCP status response structure."""
+    servers = serialize_server_status(results)
+    connected_count = sum(
+        1 for info in results.values() if info.status is ServerStatus.CONNECTED
+    )
+    return {
+        "servers": servers,
+        "connected_count": connected_count,
+        "total_count": len(servers),
+    }
+
+
+@request_mapping(api_prefix + "/mcp/status", method='GET', api=True)
+@standardized_api_output
+def get_mcp_status():
+    """Query MCP server connection status (read-only; does not trigger connection operations).
+
+    Returns:
+        dict: Status and statistics of each MCP server (connected_count / total_count)
+    """
+    return _mcp_status_response(get_mcp_server_status())
+
+
+@request_mapping(api_prefix + "/mcp/reload", method='PUT', api=True)
+@standardized_api_output
+async def reload_mcp():
+    """Reload the MCP configuration: disconnect existing connections and reconnect per mcp_servers.json.
+
+    Returns:
+        dict: Status of each MCP server after reconnection
+    """
+    return _mcp_status_response(await reload_mcp_servers(global_vars.confpath))
 
 
 @request_mapping(api_prefix + "/summary/report/list", method='GET', api=True)

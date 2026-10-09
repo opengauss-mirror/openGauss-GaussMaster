@@ -20,7 +20,6 @@ configs: "ReadonlyConfig" = None
 embedding_model = None
 reranker_model = None
 MEMORY = None
-tools_registry = {}
 llm_config = {}
 local_llm = None
 # the qa history of current session

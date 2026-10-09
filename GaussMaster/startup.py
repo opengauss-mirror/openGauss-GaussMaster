@@ -53,7 +53,7 @@ from GaussMaster.constants import __description__, __version__, LLM_CONFIG_FILE_
     SECTION_LOG, SECTION_WEB_SERVICE, SECTION_VECTOR, MISC_PATH, DBMIND, SECTION_SAFETY, GAUSSMASTER_PATH, \
     KNOWLEDGE_BASE_PATH, DB_FILE_ZH, DB_FILE_EN
 from GaussMaster.common.metadatabase.utils import get_db_instance
-from GaussMaster.multiagents.tools import base_tools
+from GaussMaster.multiagents.mcp_integration import load_and_connect_mcp_servers, ServerStatus
 from GaussMaster.server.multicluster import ClusterProxy
 from GaussMaster.server.web.data_transformer import update_llm, get_all_available_online_llms, \
     initialize_embedding_model
@@ -124,11 +124,6 @@ def init_global_configs(confpath, need_check):
     configure_psycopg2_ssl()
 
 
-def initialize_agent_components():
-    """initialize components associated with agent"""
-    global_vars.tools_registry = {**base_tools.all}
-
-
 def device_selection(configs):
     """select device when default is auto"""
     device = configs.get('model_device')
@@ -169,6 +164,8 @@ def init_logger_with_config():
     console_handler.setLevel(global_vars.configs.get(SECTION_LOG, 'level', fallback='INFO').upper())
     logger.addHandler(logging_handler)
     logger.setLevel(global_vars.configs.get(SECTION_LOG, 'level').upper())
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpx2").setLevel(logging.WARNING)
     return logging_handler
 
 
@@ -439,10 +436,24 @@ class Main:
         model_name = global_vars.llm_config.get('model_name')
         update_llm(model_name)
 
-        # initialize agent
-        initialize_agent_components()
+        from contextlib import asynccontextmanager
 
-        # Initialize global cluster info
+        @asynccontextmanager
+        async def mcp_lifespan(app):
+            results = await load_and_connect_mcp_servers(global_vars.confpath)
+            for label, info in results.items():
+                if info.status is ServerStatus.CONNECTED:
+                    utils.cli.write_to_terminal(
+                        f"MCP Server '{label}' connected", color='green')
+                else:
+                    detail = f"{info.status.label}: {info.message}" if info.message \
+                        else info.status.label
+                    utils.cli.write_to_terminal(
+                        f"MCP Server '{label}' connection failed: {detail}", color='yellow')
+            yield
+
+        _http_service.app.router.lifespan_context = mcp_lifespan
+
         try:
             init_cluster_info()
         except:

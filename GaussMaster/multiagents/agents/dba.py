@@ -14,6 +14,7 @@
 import json
 import time
 import uuid
+import logging
 from datetime import datetime, timedelta
 
 from GaussMaster import global_vars
@@ -29,11 +30,16 @@ from GaussMaster.llms import llm_registry
 from GaussMaster.llms.model_utils import resolve_model_backend, resolve_api_key, resolve_remote_model_name
 from GaussMaster.llms.executor import infer_tool_name, check_is_no_param_tool, \
     check_has_valid_tool, call_tool, infer_arguments, verify_arguments
-from GaussMaster.llms.llm_utils import InteractionType
+from GaussMaster.llms.llm_utils import InteractionType, LLMMsgKey, LLMRole
 from GaussMaster.multiagents.agents.base_agent import BaseAgent
+from GaussMaster.multiagents.agents.prompt.dba_prompt import (
+    TOOL_RESULT_INTERPRET_SYSTEM_ZH, TOOL_RESULT_INTERPRET_SYSTEM_EN,
+    construct_tool_result_interpret_prompt
+)
 from GaussMaster.server.web.jsonify_utils import sqlalchemy_query_jsonify
 from GaussMaster.utils.ui_output_util import formatter_str, DONE_FLAG, formatter_progress
 
+logger = logging.getLogger(__name__)
 
 async def interact(user_id, session_id, query, mode, model_name, history_len=1, lang='zh'):
     """
@@ -99,11 +105,15 @@ class DBA(BaseAgent):
             end_time = datetime.now(tz)
             # 默认收集最近一小时内的告警
             start_time = end_time - timedelta(minutes=60)
-            res = call_tool('summary_alarms', params={
+            res = await call_tool('summary_alarms', params={
                 'start_time': start_time.strftime('%Y-%m-%d %H:%M:%S'),
                 'end_time': end_time.strftime('%Y-%m-%d %H:%M:%S')
             })
-            yield res
+            yield [formatter_progress('结果解读中...')]
+            yield await self.interpret_tool_result('summary_alarms', {
+                'start_time': start_time.strftime('%Y-%m-%d %H:%M:%S'),
+                'end_time': end_time.strftime('%Y-%m-%d %H:%M:%S')
+            }, res)
 
         elif self.mode == InteractionType.TOOL_INTERACTION:
             async for step in self.interact_with_tool():
@@ -137,6 +147,33 @@ class DBA(BaseAgent):
             function_call=Encryption.encrypt(qa_record.function_call) if qa_record.function_call else None
         )
 
+    async def interpret_tool_result(self, tool_name: str, tool_params: dict, tool_result):
+        """Generate an LLM interpretation of the tool result."""
+        if not isinstance(tool_result, str) or not tool_result.strip():
+            return tool_result
+        if tool_result.startswith('[Tool execution error]') or 'unavailable' in tool_result:
+            return tool_result
+        try:
+            system_prompt = (TOOL_RESULT_INTERPRET_SYSTEM_EN if self.lang == 'en'
+                             else TOOL_RESULT_INTERPRET_SYSTEM_ZH)
+            prompt = construct_tool_result_interpret_prompt(
+                question=self.question, tool_name=tool_name,
+                tool_params=tool_params, tool_result=tool_result, lang=self.lang
+            )
+            message_inputs = [
+                {LLMMsgKey.ROLE: LLMRole.SYSTEM, LLMMsgKey.CONTENT: system_prompt},
+                {LLMMsgKey.ROLE: LLMRole.USER, LLMMsgKey.CONTENT: prompt},
+            ]
+            answer, _ = await self.llm.invoke(message_inputs)
+            answer = (answer or '').strip()
+            if not answer:
+                logger.warning("Tool '%s' result interpretation is empty; falling back to the raw result", tool_name)
+                return tool_result
+            return answer
+        except Exception:
+            logger.exception("Tool '%s' result interpretation failed; falling back to the raw result", tool_name)
+            return tool_result
+
     async def interact_with_tool(self):
         """interact with third party tools"""
         # 1. check the session intention
@@ -157,10 +194,12 @@ class DBA(BaseAgent):
             no_need_param = check_is_no_param_tool(matched_tool)
             if no_need_param:
                 yield [formatter_progress('工具调用中...')]
-                tool_result = call_tool(matched_tool)
-                yield tool_result
+                tool_result = await call_tool(matched_tool)
+                yield [formatter_progress('结果解读中...')]
+                answer = await self.interpret_tool_result(matched_tool, {}, tool_result)
                 content_resp = f'将为您调用工具{matched_tool}'
                 await self.save_assistant_resp(content_resp=content_resp, tool_name=matched_tool)
+                yield answer
                 return
             intention_tool = matched_tool
         # 3. the intention is not None, now need to infer arguments
@@ -172,10 +211,12 @@ class DBA(BaseAgent):
             is_complete_params, correct_params, need_prams = verify_arguments(function_call)
             if is_complete_params:
                 yield [formatter_progress('工具调用中...')]
-                tool_result = call_tool(intention_tool, correct_params)
+                tool_result = await call_tool(intention_tool, correct_params)
+                yield [formatter_progress('结果解读中...')]
+                answer = await self.interpret_tool_result(intention_tool, correct_params, tool_result)
                 await self.save_assistant_resp(content_resp=content_resp, tool_name=intention_tool,
                                                tool_params=correct_params)
-                yield tool_result
+                yield answer
             else:
                 content_resp = f'缺少参数{",".join(list(need_prams.keys()))}， 请一次性提供完整'
                 await self.save_assistant_resp(content_resp=content_resp, intent_tool=intention_tool)
