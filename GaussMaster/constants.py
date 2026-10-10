@@ -24,6 +24,7 @@ MISC_PATH = os.path.join(GAUSSMASTER_PATH, 'misc')
 
 CONFILE_NAME = 'gaussmaster.conf'  # the name of configuration file
 LLM_CONFIG_FILE_NAME = 'model_config.yaml'
+MCP_CONFIG_FILE_NAME = 'mcp_servers.json'
 DYNAMIC_CONFIG = 'dynamic_config.db'
 ENCRYPTION_PART_B = 'encryption_part_b.bin'
 

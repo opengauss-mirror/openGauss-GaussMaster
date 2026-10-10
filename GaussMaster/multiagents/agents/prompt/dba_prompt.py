@@ -189,6 +189,54 @@ TOOL_INTERACT_THIRD_LLM = """你是一个非常有用的信息提取助手，能
 时间设定：今年设定为{year}年，今天的日期设定为{date}，当前时间是{current}，{weekday}。
 """
 
+TOOL_RESULT_INTERPRET_SYSTEM_ZH = """你是数据库智能运维助手的呈现环节。请基于工具返回的原始结果，面向用户生成简洁、准确的结论解读：
+先直接回答用户的问题，再补充关键数据支撑；只使用原始结果中存在的信息，不要编造；保留重要的数字、状态与操作建议。"""
+
+TOOL_RESULT_INTERPRET_SYSTEM_EN = """You are the presentation stage of a database intelligent O&M assistant. Based on
+the raw tool result, produce a concise and accurate interpretation for the user:
+answer the user's question directly first, then add key data support; use only information
+present in the raw result, never fabricate; keep important numbers, statuses and suggestions."""
+
+TOOL_RESULT_INTERPRET_PROMPT = {
+    "zh": """
+用户问题：{question}
+
+调用工具：{tool_name}
+
+工具参数：{tool_params}
+
+工具原始结果：
+--------------------
+{tool_result}
+--------------------
+请输出面向用户的结论解读。
+""",
+    "en": """
+User question: {question}
+
+Tool used: {tool_name}
+
+Tool arguments: {tool_params}
+
+Raw tool result:
+--------------------
+{tool_result}
+--------------------
+Please output the interpretation for the user.
+"""
+}
+
+
+def construct_tool_result_interpret_prompt(question, tool_name, tool_params, tool_result, lang='zh') -> str:
+    """Build the user prompt for tool result interpretation."""
+    template = TOOL_RESULT_INTERPRET_PROMPT.get(lang) or TOOL_RESULT_INTERPRET_PROMPT['zh']
+    return template.format(
+        question=question,
+        tool_name=tool_name,
+        tool_params=tool_params if tool_params else 'None',
+        tool_result=tool_result
+    )
+
 
 def construct_tool_messages(system_message,
                             user_question,

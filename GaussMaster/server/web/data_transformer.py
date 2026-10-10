@@ -41,7 +41,6 @@ from GaussMaster.constants import GAUSSMASTER_PATH, VERSION_SUPPORT_LIST, LANGUA
 from GaussMaster.llms.model_utils import resolve_api_key, resolve_remote_model_name
 from GaussMaster.llms.llm_utils import InteractionType
 from GaussMaster.multiagents.agents.dba import interact
-from GaussMaster.multiagents.tools import base_tools
 from GaussMaster.multiagents.tools.dbmind_interface import get_cluster_list, fetch_all_alarms, retrieve_cluster_status
 from GaussMaster.server.web.context_manager import set_user_current_instance, set_default_llm, set_user_current_llm, \
     current_instance
