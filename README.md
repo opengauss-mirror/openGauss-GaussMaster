@@ -10,6 +10,11 @@
   - [向量模型配置](#向量模型配置)
   - [前台服务部署](#前台服务部署)
 - [快速上手](#快速上手)
+- [接入MCP Server工具](#接入MCP-Server工具)
+  - [功能简介](#功能简介)
+  - [配置mcp_servers.json](#配置mcp_serversjson)
+  - [启动加载](#启动加载)
+  - [状态查询与热重载](#状态查询与热重载)
 - [贡献](#贡献)
 - [许可证](#许可证)
 
@@ -168,6 +173,87 @@ curl -X 'POST' 'http://<gaussmaster_endpoint>/v1/api/app/intelligent-interaction
 ```
 
 其中`<user_id>`和`<session_id>`分别为本次对话的用户和session id的唯一标识符。
+
+## 接入MCP Server工具
+
+### 功能简介
+
+GaussMaster支持通过[MCP（Model Context Protocol）](https://modelcontextprotocol.io/)协议接入外部MCP Server，将其提供的工具动态扩展到智能运维工具集中。接入后，MCP工具与GaussMaster内置工具在交互式运维中统一使用：大模型会根据用户提问自动完成工具匹配与参数推断，无需额外开发即可扩充运维能力。
+
+当前支持两种传输方式的MCP Server：
+- **stdio**：GaussMaster以子进程方式启动并通信，适用于本地工具进程
+- **Streamable HTTP**：GaussMaster通过HTTP连接远程MCP Server
+
+### 配置mcp_servers.json
+
+在`conf`目录下创建（或修改）`mcp_servers.json`配置文件。该文件为JSON格式，顶层键为`mcpServers`，每个MCP Server以名称为键。stdio方式通过`command`字段识别，HTTP方式通过`url`字段识别，两者互斥，不可同时配置。
+
+```json
+{
+  "mcpServers": {
+    "server-filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/data"],
+      "env": {}
+    },
+    "server-remote-tools": {
+      "url": "http://*.*.*.*:8000/mcp",
+      "headers": {},
+      "timeout": 30.0
+    }
+  }
+}
+```
+
+字段说明：
+- stdio方式：`command`为启动命令，`args`为命令参数列表，`env`为环境变量（可选）
+- HTTP方式：`url`为MCP Server地址，`headers`为请求头（可选），`timeout`为连接超时时间（秒，默认30.0）
+- Server名称不能重复；配置文件中不允许出现重复的JSON键
+
+### 启动加载
+
+执行`python startup.py service start -c conf`启动服务时，GaussMaster会自动读取`mcp_servers.json`并连接其中定义的所有MCP Server。连接结果会输出到终端：
+- 连接成功：`MCP Server '<名称>' connected`
+- 连接失败：`MCP Server '<名称>' connection failed: <原因>`
+
+配置文件不存在或内容非法时**不会阻塞服务启动**，仅记录告警日志并跳过MCP初始化。
+
+连接成功后，MCP工具会以`<server名称>_<工具名>`的形式自动加入工具集，与内置工具一起参与智能运维交互。若MCP工具与内置工具同名，内置工具优先生效。
+
+服务运行期间，GaussMaster会周期性（默认30秒）对MCP Server进行健康巡检，连续多次不可达时会自动断开旧连接并在下一轮巡检中自动重连。
+
+### 状态查询与热重载
+
+**查询连接状态**（只读，不触发连接操作）：
+
+```shell
+curl -X 'GET' 'http://<gaussmaster_endpoint>/v1/api/mcp/status'
+```
+
+返回示例（字段以实际返回为准）：
+
+```json
+{
+  "servers": {
+    "filesystem": {
+      "status": "connected",
+      "status_label": "Connected",
+      "transport": "stdio",
+      "message": ""
+    }
+  },
+  "connected_count": 1,
+  "total_count": 1
+}
+```
+
+**热重载配置**：修改`mcp_servers.json`后，无需重启服务，调用如下接口即可断开现有连接并按新配置重新连接：
+
+```shell
+curl -X 'PUT' 'http://<gaussmaster_endpoint>/v1/api/mcp/reload'
+```
+
+重载失败时GaussMaster会保留旧连接，不影响现有功能。
 
 ## 贡献
 
